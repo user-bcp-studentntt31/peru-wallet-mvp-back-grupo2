@@ -55,6 +55,30 @@ class JsonWalletRepositoryTest {
     }
 
     @Test
+    void migratesVersion1ExpensesFromDecimalPenToIntegerCents() throws Exception {
+        Path file = directory.resolve("wallets.json");
+        Files.writeString(file, """
+                {"schemaVersion":1,"wallets":{},"registrations":{},"events":[],"activities":{},
+                 "expenses":{"k":{"id":"%s","month":"2026-10","channel":"organic","amountPen":10.55,"recordedAt":"2026-10-01T00:00:00Z"}}}
+                """.formatted(UUID.randomUUID()));
+        long cents = repository().update(state -> state.expenses.get("k").amountCents());
+        assertEquals(1055L, cents);
+        String saved = Files.readString(file);
+        assertTrue(saved.contains("\"schemaVersion\" : 2"));
+        assertFalse(saved.contains("amountPen"));
+        assertEquals(1055L, (long) repository().read(state -> state.expenses.get("k").amountCents()));
+    }
+
+    @Test
+    void unsupportedSchemaVersionIsRejectedWithoutDataLoss() throws Exception {
+        Path file = directory.resolve("wallets.json");
+        String content = "{\"schemaVersion\":99,\"wallets\":{},\"registrations\":{},\"events\":[],\"expenses\":{},\"activities\":{}}";
+        Files.writeString(file, content);
+        assertThrows(JsonWalletRepository.StorageException.class, () -> repository().update(state -> true));
+        assertEquals(content, Files.readString(file));
+    }
+
+    @Test
     void serializesConcurrentUpdatesInTheSameInstance() throws Exception {
         JsonWalletRepository repository = repository();
         try (var executor = java.util.concurrent.Executors.newFixedThreadPool(4)) {

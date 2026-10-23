@@ -88,7 +88,7 @@ class OnboardingApiTest {
         given().header("Authorization", "Bearer " + token).get("/api/wallets/" + id + "/onboarding")
                 .then().statusCode(200).body("currentStep", equalTo("PROFILE"));
         given().header("Authorization", "Bearer " + token()).get("/api/wallets/" + id + "/onboarding")
-                .then().statusCode(401).body("code", equalTo("WALLET_UNAUTHORIZED"));
+                .then().statusCode(404).body("code", equalTo("WALLET_NOT_FOUND"));
     }
 
     @Test
@@ -119,7 +119,7 @@ class OnboardingApiTest {
                 .post("/api/wallets/" + id + "/activity").then().statusCode(200).body("eventId", equalTo(eventId));
         String month = YearMonth.now(ZoneId.of("America/Lima")).toString();
         String costKey = UUID.randomUUID().toString();
-        var cost = Map.of("month", month, "channel", "organic", "amountPen", 10);
+        var cost = Map.of("month", month, "channel", "organic", "amountCents", 1000);
         String expenseId = given().contentType("application/json").header("X-Analytics-Key", ADMIN_KEY)
                 .header("Idempotency-Key", costKey).body(cost).post("/api/analytics/acquisition-costs")
                 .then().statusCode(200).extract().path("id");
@@ -128,8 +128,10 @@ class OnboardingApiTest {
                 .then().statusCode(200).body("id", equalTo(expenseId));
         given().queryParam("month", month).get("/api/analytics/monthly").then().statusCode(401);
         given().header("X-Analytics-Key", ADMIN_KEY).queryParam("month", month)
-                .get("/api/analytics/monthly").then().statusCode(200).body("monthlyActiveUsers", greaterThanOrEqualTo(1))
-                .body("newActivatedUsers", greaterThanOrEqualTo(1)).body("cacPenPerNewActivatedUser", notNullValue());
+                .get("/api/analytics/monthly").then().statusCode(200).body("activatedWallets", greaterThanOrEqualTo(1))
+                .body("acquisitionSpendCents", equalTo(1000))
+                .body("monthlyActiveUsers.available", equalTo(false)).body("monthlyActiveUsers.value", nullValue())
+                .body("acquisitionCost.available", equalTo(false)).body("acquisitionCost.value", nullValue());
     }
 
     @Test

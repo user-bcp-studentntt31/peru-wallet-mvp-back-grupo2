@@ -54,14 +54,19 @@ Write-Host 'OK: wallet ACTIVE, pagos MOCK y actividad idempotente.'
 if ($env:WALLET_ANALYTICS_KEY) {
     $adminHeaders = @{ 'X-Analytics-Key' = $env:WALLET_ANALYTICS_KEY; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
     $month = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTimeOffset]::UtcNow, 'SA Pacific Standard Time').ToString('yyyy-MM')
-    $cost = @{ month = $month; channel = $channel; amountPen = 10.00 } | ConvertTo-Json
+    $cost = @{ month = $month; channel = $channel; amountCents = 1000 } | ConvertTo-Json
     $null = Invoke-RestMethod "$BaseUrl/api/analytics/acquisition-costs" -Method Post -Headers $adminHeaders -ContentType 'application/json' -Body $cost
     $report = Invoke-RestMethod "$BaseUrl/api/analytics/monthly?month=$month&channel=$channel" -Headers $adminHeaders
-    if ($report.newActivatedUsers -ne 1 -or $report.monthlyActiveUsers -ne 1 -or $report.cacPenPerNewActivatedUser -ne 10) {
+    if ($report.activatedWallets -ne 1 -or $report.acquisitionSpendCents -ne 1000) {
         throw 'El reporte no coincide con la cohorte ficticia de esta demo.'
     }
-    $report | Select-Object month, channel, newActivatedUsers, monthlyActiveUsers, medianOnboardingSeconds, cacPenPerNewActivatedUser | Format-List
-    Write-Host 'OK: analitica calculada con una activacion y gasto ficticio de PEN 10; no demuestra las metas reales del MVP.'
+    if ($report.monthlyActiveUsers.available -or $report.acquisitionCost.available) {
+        throw 'MAU y CAC deben figurar como no disponibles hasta que Producto apruebe definiciones y fuentes.'
+    }
+    $report | Select-Object month, channel, dataMode, activatedWallets, medianOnboardingSeconds, acquisitionSpendCents | Format-List
+    Write-Host "MAU: $($report.monthlyActiveUsers.reason)"
+    Write-Host "CAC: $($report.acquisitionCost.reason)"
+    Write-Host 'OK: analitica con una activacion y gasto ficticio de 1000 centimos; MAU/CAC no disponibles; no demuestra las metas reales del MVP.'
 }
 else {
     Write-Host 'Analitica omitida: configura la misma WALLET_ANALYTICS_KEY en servidor y esta terminal si deseas comprobarla.'

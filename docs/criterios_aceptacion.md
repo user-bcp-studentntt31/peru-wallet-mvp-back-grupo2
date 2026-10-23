@@ -19,7 +19,9 @@ propuestas tecnicas para poder probar la HU, no decisiones legales ni comerciale
 | 3. Al finalizar, estado activo y acceso al punto de entrada de pagos | Ultima operacion valida consentimiento y guarda ACTIVE junto a eventos; GET payments/entry exige ACTIVE. | Activacion y pagos exclusivamente mock. |
 | 4. Eventos de inicio, cada paso y cierre | Eventos con ID y timestamp de servidor; reintentos no duplican completados. Almacen atomico. | No hay broker ni integracion externa de analitica. Cierre significa exito; abandono se infiere de ausencia de cierre, no de un evento de navegador garantizado. |
 | 5. Mediana de 8 a 3 minutos dentro del trimestre | Calcula mediana mensual de casos completados; tests verifican calculo y fixtures. Devuelve target 180 segundos. | No demuestra mejora real ni define la fecha de lanzamiento. La frontera inicio-fin requiere aprobacion. |
-| 6. Conteos y gasto para verificar MAU/CAC meses 1-3 | Activaciones, wallets distintas con actividad, gastos PEN por canal/mes, CAC y ausencia de datos explicitada. | Nuevos activos != MAU. Origen confiable del gasto, usuario adquirido, actividad y ventanas comerciales requieren aprobacion. |
+| 6. Conteos y gasto para verificar MAU/CAC meses 1-3 | Activaciones por mes/canal y gasto en centimos. MAU y CAC se devuelven como no disponibles (`available: false`) hasta que Producto apruebe definiciones y fuentes (D7, D8). | Nuevos activos != MAU. Origen confiable del gasto, usuario adquirido, actividad y ventanas comerciales requieren aprobacion. |
+
+Matriz completa criterio -> tarea -> prueba y bloqueos abiertos: `docs/matriz_trazabilidad.md`.
 
 ## Supuestos de demo
 

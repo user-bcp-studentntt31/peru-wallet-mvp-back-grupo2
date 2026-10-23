@@ -88,15 +88,35 @@ queda en el JSON. No compartir el token ni incluirlo en URL o capturas.
 | `POST /api/wallets` | Iniciar con `{ "country": "PE", "channel": "organic" }` e `Idempotency-Key`. 201 nuevo, 200 reintento. |
 | `GET /api/wallets/{id}/onboarding` | Consultar y reanudar progreso. |
 | `PUT /api/wallets/{id}/onboarding/profile` | Guardar `{ "displayName": "Usuario Demo", "email": "demo@wallet.test" }`. |
-| `POST /api/wallets/{id}/onboarding/verification` | Pedir verificacion mock, sin cuerpo. |
+| `POST /api/wallets/{id}/onboarding/verification` | Pedir verificacion mock, sin cuerpo. Solo en modo `DEMO`. |
 | `PUT /api/wallets/{id}/onboarding/consent` | Aceptar `{ "accepted": true }` y activar atomicamente. |
-| `GET /api/wallets/{id}/payments/entry` | Entrada de pagos, solo ACTIVE, siempre modo MOCK. |
+| `GET /api/wallets/{id}/payments/entry` | Entrada de pagos, solo ACTIVE y solo del propietario. No transaccional (`transactional: false`). |
 | `POST /api/wallets/{id}/activity` | Registrar apertura del acceso a pagos mock; requiere nueva `Idempotency-Key` por actividad. |
 
 La clave de registro no se reutiliza con otra wallet o datos. El mismo token no
 puede crear otra wallet cambiando la clave de registro. Un perfil confirmado no
 se edita en esta HU; el mismo PUT es idempotente, otros valores devuelven 409.
 Repetir verificacion o consentimiento completados no duplica eventos.
+
+Una wallet inexistente y una wallet de otra persona responden igual
+(`404 WALLET_NOT_FOUND`) para no revelar si el recurso existe. Sin token valido: 401.
+Los errores nunca repiten los valores enviados; solo indican los campos a corregir.
+
+### Estados y verificacion
+
+`status`: `ONBOARDING`, `PENDING_VERIFICATION`, `VERIFICATION_REJECTED` o `ACTIVE`.
+`verification` informa `status` (`NOT_STARTED`, `PENDING`, `REJECTED`, `APPROVED`) y
+`simulated`. Con `simulated: true` el resultado es de demostracion, no KYC real.
+Un rechazo se guarda y se ve en `GET onboarding`; `POST verification` responde 422
+y se puede reintentar. Pendiente, rechazado o desconocido nunca activan la wallet.
+
+### Modo demo y produccion
+
+`WALLET_MODE` (predeterminado `DEMO`). Solo `DEMO` acepta la verificacion simulada.
+Cualquier otro valor se trata como produccion y `POST verification` responde
+`503 KYC_NOT_CONFIGURED`: sin un proveedor real aprobado no se activa ninguna wallet,
+aunque `WALLET_MOCK_KYC_RESULT` sea `APPROVED`. Wallets, eventos y gastos guardan el
+modo con el que se crearon, y los reportes solo agregan datos del modo vigente.
 
 Este token de posesion es **autorizacion demo**, no login productivo: no implementa
 OIDC, MFA, expiracion, recuperacion de token perdido ni recuperacion de wallet por
@@ -123,26 +143,33 @@ variable del cliente no cambia la del servidor ya iniciado. Tambien puedes copia
 
 | Metodo y ruta | Cabeceras y parametros |
 | --- | --- |
-| `POST /api/analytics/acquisition-costs` | `X-Analytics-Key`, `Idempotency-Key`; `{ "month":"2026-10", "channel":"organic", "amountPen":10.00 }`. |
+| `POST /api/analytics/acquisition-costs` | `X-Analytics-Key`, `Idempotency-Key`; `{ "month":"2026-10", "channel":"organic", "amountCents":1000 }`. Entero en centimos de PEN; los decimales se rechazan con 400. |
 | `GET /api/analytics/monthly?month=2026-10` | `X-Analytics-Key`; filtro `channel` opcional. |
 | `GET /api/analytics/events?walletId={id}&offset=0&limit=100` | `X-Analytics-Key`; walletId opcional, limite maximo 200. |
 
-Eventos: `ONBOARDING_STARTED`, `STEP_COMPLETED`, `ONBOARDING_COMPLETED` y
-`WALLET_ACTIVITY`. Las marcas de tiempo las genera el servidor en UTC; los reportes
+Eventos: `ONBOARDING_STARTED`, `STEP_COMPLETED` (con el paso, sin valores),
+`ONBOARDING_COMPLETED` y `WALLET_ACTIVITY`. Cada evento solo trae `id`, `walletId`,
+`type`, `step`, `occurredAt` (UTC, generado por el servidor) y `mode`. Los reportes
 mensuales usan `America/Lima`. Los eventos no contienen nombre, email ni tokens.
+No se emite `onboarding_exited`: una salida explicita no es observable de forma
+fiable y un cierre, desconexion o expiracion no se interpreta como salida (D5).
 
 **Definiciones propuestas, no aprobadas aun por PO:**
 
-- Mediana: duracion entre inicio y activacion correcta, incluyendo pausas/reanudacion,
-  para las wallets completadas en ese mes y canal. Target de referencia: 180 segundos.
-- Nuevos activos: wallets activadas en el mes. No equivale a MAU.
-- MAU demo: wallets distintas con evento de actividad de apertura de pagos durante
-  el mes. Un alta sin actividad no cuenta. Un cliente malicioso puede falsear esta
-  senal de demo: produccion necesita eventos confiables del negocio real.
-- CAC demo: gasto PEN registrado del mes/canal dividido por activaciones de ese
-  mes/canal. No se divide entre MAU. Requiere que Operaciones cargue gasto completo.
-- Sin gasto registrado, `acquisitionSpendPen` y CAC son `null`; no se inventa gasto
-  cero. Si hay cero activaciones, CAC es `null` incluso con gasto informado.
+- Mediana: duracion entre el primer inicio persistido y la activacion correcta,
+  incluyendo pausas/reanudacion (el inicio no se reinicia al retomar), para las
+  wallets activadas en ese mes y canal. Target de referencia: 180 segundos, expuesto
+  con `targetEvaluation: NOT_EVALUATED` hasta que Producto defina cohorte y periodo (D6).
+- `activatedWallets`: wallets activadas en el mes. No equivale a MAU.
+- `monthlyActiveUsers` y `acquisitionCost` son `{ available, value, unit, reason }`.
+  Se devuelven con `available: false` y `value: null` mientras falten la definicion y
+  fuente de MAU (D7) o la fuente de gasto, atribucion y denominador de CAC (D8).
+  Nunca se sustituyen por activaciones ni por eventos de actividad mock. Cuando
+  Producto los apruebe se habilitan con `WALLET_METRICS_MAU_APPROVED=true` y
+  `WALLET_METRICS_CAC_APPROVED=true`; el CAC es entero en centimos, redondeado a
+  centimo con la mitad hacia arriba.
+- Sin gasto registrado, `acquisitionSpendCents` es `null`; no se inventa gasto cero.
+  Si hay cero activaciones, el CAC no esta disponible incluso con gasto informado.
 - La vista `ALL` agrega los gastos disponibles, no certifica integridad de las
   fuentes de gasto. Verificar canales faltantes antes de interpretar el total.
 - Lanzamiento, ventanas meses 1-3, identidad adquirida vs activada y actividad oficial
@@ -153,6 +180,7 @@ mensuales usan `America/Lima`. Los eventos no contienen nombre, email ni tokens.
 
 El archivo se crea automaticamente al primer cambio y guarda wallets, eventos,
 gastos e idempotencia en una misma escritura. No se resetea al arrancar.
+Esquema v2: los gastos usan `amountCents`; un archivo v1 (`amountPen`) se migra al leerlo.
 
 - Bloqueo de archivo y exclusividad dentro de la instancia para evitar cambios perdidos.
 - Escritura a temporal, `force` y reemplazo atomico: no hay fallback que trunque el
@@ -170,6 +198,8 @@ gastos e idempotencia en una misma escritura. No se resetea al arrancar.
 | `WALLET_STORAGE_PATH` | `data/wallet-store.json`, relativo a la carpeta de arranque. |
 | `WALLET_MOCK_KYC_ENABLED` | `true` |
 | `WALLET_MOCK_KYC_RESULT` | `APPROVED`; admite `PENDING` o `REJECTED`. |
+| `WALLET_MODE` | `DEMO`. Otro valor = produccion: la verificacion simulada nunca activa. |
+| `WALLET_METRICS_MAU_APPROVED` / `WALLET_METRICS_CAC_APPROVED` | `false`: MAU y CAC no disponibles. |
 | `WALLET_ANALYTICS_KEY` | Vacio: analitica devuelve 503. |
 
 ## Probar con un recorrido real

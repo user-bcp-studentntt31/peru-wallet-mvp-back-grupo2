@@ -3,6 +3,7 @@ package pe.wallet.service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import pe.wallet.model.WalletData;
 import pe.wallet.model.WalletData.*;
 import pe.wallet.repository.JsonWalletRepository;
 import pe.wallet.view.ApiModels.*;
@@ -18,6 +19,7 @@ import java.util.stream.IntStream;
 public class WalletService {
     @Inject JsonWalletRepository repository;
     @Inject AccessControl access;
+    @Inject RuntimeMode runtime;
     @ConfigProperty(name = "wallet.mock-kyc.enabled") boolean mockKycEnabled;
     @ConfigProperty(name = "wallet.mock-kyc.result") String mockKycResult;
 
@@ -27,8 +29,9 @@ public class WalletService {
         return repository.update(state -> {
             UUID existingId = state.registrations.get(key);
             if (existingId != null) {
-                Wallet existing = requireWallet(state, existingId, tokenHash);
-                if (!existing.country().equals(request.country()) || !existing.channel().equals(request.channel())) {
+                Wallet existing = state.wallets.get(existingId);
+                if (existing == null || !AccessControl.same(existing.accessTokenHash(), tokenHash)
+                        || !existing.country().equals(request.country()) || !existing.channel().equals(request.channel())) {
                     throw new ApiException(409, "IDEMPOTENCY_CONFLICT", "La clave ya se uso con otros datos. Reutiliza la solicitud original.");
                 }
                 return new RegistrationResult(view(existing), false);
@@ -39,7 +42,7 @@ public class WalletService {
             }
             Instant now = Instant.now();
             Wallet wallet = new Wallet(UUID.randomUUID(), tokenHash, request.country(), request.channel(), null, null,
-                    Status.ONBOARDING, List.of(), now, null);
+                    Status.ONBOARDING, List.of(), now, null, runtime.label());
             state.wallets.put(wallet.id(), wallet);
             state.registrations.put(key, wallet.id());
             event(state, wallet, EventType.ONBOARDING_STARTED, null, now);
@@ -68,8 +71,7 @@ public class WalletService {
             requireStep(wallet, Step.PROFILE);
             boolean duplicateEmail = state.wallets.values().stream().anyMatch(other -> !other.id().equals(id) && email.equals(other.email()));
             if (duplicateEmail) { throw new ApiException(409, "PROFILE_CONFLICT", "Ese correo de prueba ya esta registrado. Usa otro correo ficticio."); }
-            Wallet updated = new Wallet(id, wallet.accessTokenHash(), wallet.country(), wallet.channel(), name, email,
-                    Status.ONBOARDING, List.of(Step.PROFILE), wallet.startedAt(), null);
+            Wallet updated = wallet.with(name, email, Status.ONBOARDING, List.of(Step.PROFILE), null);
             state.wallets.put(id, updated);
             event(state, updated, EventType.STEP_COMPLETED, Step.PROFILE, Instant.now());
             return view(updated);
@@ -78,31 +80,31 @@ public class WalletService {
 
     public WalletView verify(UUID id, String authorization) {
         String tokenHash = access.tokenHash(authorization);
-        return repository.update(state -> {
+        WalletView result = repository.update(state -> {
             Wallet wallet = requireWallet(state, id, tokenHash);
             if (wallet.completedSteps().contains(Step.VERIFICATION)) { return view(wallet); }
             requireStep(wallet, Step.VERIFICATION);
-            if (!mockKycEnabled) {
+            // Una verificacion simulada solo se acepta en modo DEMO; sin proveedor real aprobado, produccion nunca activa.
+            if (!runtime.isDemo() || !mockKycEnabled) {
                 throw new ApiException(503, "KYC_NOT_CONFIGURED", "Solo existe un proveedor KYC simulado. La activacion real no esta habilitada.");
             }
-            if ("REJECTED".equals(mockKycResult)) {
-                throw new ApiException(422, "MOCK_VERIFICATION_REJECTED", "La verificacion simulada fue rechazada. No se activo la wallet.");
+            Wallet updated;
+            switch (mockKycResult == null ? "" : mockKycResult) {
+                case "REJECTED" -> updated = wallet.with(Status.VERIFICATION_REJECTED, wallet.completedSteps(), null);
+                case "PENDING" -> updated = wallet.with(Status.PENDING_VERIFICATION, wallet.completedSteps(), null);
+                case "APPROVED" -> {
+                    updated = wallet.with(Status.ONBOARDING, List.of(Step.PROFILE, Step.VERIFICATION), null);
+                    event(state, updated, EventType.STEP_COMPLETED, Step.VERIFICATION, Instant.now());
+                }
+                default -> throw new ApiException(503, "INVALID_KYC_CONFIGURATION", "El resultado KYC mock debe ser APPROVED, REJECTED o PENDING.");
             }
-            if ("PENDING".equals(mockKycResult)) {
-                Wallet pending = new Wallet(id, wallet.accessTokenHash(), wallet.country(), wallet.channel(), wallet.displayName(), wallet.email(),
-                        Status.PENDING_VERIFICATION, wallet.completedSteps(), wallet.startedAt(), null);
-                state.wallets.put(id, pending);
-                return view(pending);
-            }
-            if (!"APPROVED".equals(mockKycResult)) {
-                throw new ApiException(503, "INVALID_KYC_CONFIGURATION", "El resultado KYC mock debe ser APPROVED, REJECTED o PENDING.");
-            }
-            Wallet updated = new Wallet(id, wallet.accessTokenHash(), wallet.country(), wallet.channel(), wallet.displayName(), wallet.email(),
-                    Status.ONBOARDING, List.of(Step.PROFILE, Step.VERIFICATION), wallet.startedAt(), null);
             state.wallets.put(id, updated);
-            event(state, updated, EventType.STEP_COMPLETED, Step.VERIFICATION, Instant.now());
             return view(updated);
         });
+        if (result.status() == Status.VERIFICATION_REJECTED) {
+            throw new ApiException(422, "MOCK_VERIFICATION_REJECTED", "La verificacion simulada fue rechazada. No se activo la wallet.");
+        }
+        return result;
     }
 
     public WalletView consent(UUID id, String authorization) {
@@ -112,8 +114,7 @@ public class WalletService {
             if (wallet.status() == Status.ACTIVE) { return view(wallet); }
             requireStep(wallet, Step.CONSENT);
             Instant now = Instant.now();
-            Wallet updated = new Wallet(id, wallet.accessTokenHash(), wallet.country(), wallet.channel(), wallet.displayName(), wallet.email(),
-                    Status.ACTIVE, List.of(Step.values()), wallet.startedAt(), now);
+            Wallet updated = wallet.with(Status.ACTIVE, List.of(Step.values()), now);
             state.wallets.put(id, updated);
             event(state, updated, EventType.STEP_COMPLETED, Step.CONSENT, now);
             event(state, updated, EventType.ONBOARDING_COMPLETED, null, now);
@@ -126,7 +127,8 @@ public class WalletService {
         return repository.read(state -> {
             Wallet wallet = requireWallet(state, id, tokenHash);
             requireActive(wallet);
-            return new PaymentEntry(id, true, "PEN", "MOCK", "Punto de entrada disponible. Esta demo no procesa pagos reales.");
+            return new PaymentEntry(id, true, "PEN", "MOCK", false,
+                    "Punto de entrada disponible. Esta iniciativa no procesa pagos ni transferencias.");
         });
     }
 
@@ -147,9 +149,9 @@ public class WalletService {
 
     private Wallet requireWallet(State state, UUID id, String tokenHash) {
         Wallet wallet = state.wallets.get(id);
-        if (wallet == null) { throw new ApiException(404, "WALLET_NOT_FOUND", "No se encontro la wallet solicitada."); }
-        if (!AccessControl.same(wallet.accessTokenHash(), tokenHash)) {
-            throw new ApiException(401, "WALLET_UNAUTHORIZED", "El token no permite acceder a esta wallet.");
+        // Misma respuesta para una wallet inexistente y una ajena: no se revela si el recurso existe.
+        if (wallet == null || !AccessControl.same(wallet.accessTokenHash(), tokenHash)) {
+            throw new ApiException(404, "WALLET_NOT_FOUND", "No se encontro la wallet solicitada para este token.");
         }
         return wallet;
     }
@@ -168,12 +170,15 @@ public class WalletService {
 
     private WalletView view(Wallet wallet) {
         Step current = currentStep(wallet);
+        boolean demo = !"PRODUCTION".equals(WalletData.modeOf(wallet.mode()));
         String nextAction = current == null ? "Abre el punto de entrada de pagos mock."
                 : switch (current) {
                     case PROFILE -> "Completa tu nombre ficticio y correo .test.";
-                    case VERIFICATION -> wallet.status() == Status.PENDING_VERIFICATION
-                            ? "Verificacion mock pendiente. Reintenta cuando el proveedor simulado resuelva."
-                            : "Solicita la verificacion simulada del perfil.";
+                    case VERIFICATION -> switch (wallet.status()) {
+                        case PENDING_VERIFICATION -> "Verificacion mock pendiente. Reintenta cuando el proveedor simulado resuelva.";
+                        case VERIFICATION_REJECTED -> "La verificacion simulada no fue aprobada. Puedes solicitarla de nuevo; la wallet sigue inactiva.";
+                        default -> "Solicita la verificacion simulada del perfil.";
+                    };
                     case CONSENT -> "Acepta los terminos de la demo para activar la wallet mock.";
                 };
         List<StepView> steps = IntStream.range(0, Step.values().length).mapToObj(position -> {
@@ -181,11 +186,24 @@ public class WalletService {
             return new StepView(step, position + 1, wallet.completedSteps().contains(step), step == current);
         }).toList();
         return new WalletView(wallet.id(), wallet.status(), wallet.country(), wallet.channel(), steps, current, nextAction,
-                wallet.startedAt(), wallet.completedAt(), wallet.status() == Status.ACTIVE, true);
+                wallet.startedAt(), wallet.completedAt(), wallet.status() == Status.ACTIVE, demo,
+                WalletData.modeOf(wallet.mode()), verification(wallet, demo));
+    }
+
+    private VerificationView verification(Wallet wallet, boolean demo) {
+        String simulated = demo ? "Verificacion simulada de demostracion; no es KYC real. " : "";
+        if (wallet.completedSteps().contains(Step.VERIFICATION)) {
+            return new VerificationView(VerificationStatus.APPROVED, demo, simulated + "Aprobada.");
+        }
+        return switch (wallet.status()) {
+            case PENDING_VERIFICATION -> new VerificationView(VerificationStatus.PENDING, demo, simulated + "Pendiente: la wallet aun no esta activa.");
+            case VERIFICATION_REJECTED -> new VerificationView(VerificationStatus.REJECTED, demo, simulated + "No aprobada: la wallet no esta activa.");
+            default -> new VerificationView(VerificationStatus.NOT_STARTED, demo, simulated + "Aun no solicitada.");
+        };
     }
 
     private Event event(State state, Wallet wallet, EventType type, Step step, Instant now) {
-        Event event = new Event(UUID.randomUUID(), wallet.id(), type, step, now);
+        Event event = new Event(UUID.randomUUID(), wallet.id(), type, step, now, WalletData.modeOf(wallet.mode()));
         state.events.add(event);
         return event;
     }
